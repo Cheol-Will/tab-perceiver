@@ -6,6 +6,8 @@ from .tabnet import TabNet
 from .resnet import ResNet
 from .tab_transformer import TabTransformer
 from .mlp import MLP
+from .ft_perceiver import FTPerceiver
+
 
 __all__ = classes = [
     'Trompt',
@@ -15,4 +17,5 @@ __all__ = classes = [
     'ResNet',
     'TabTransformer',
     'MLP',
+    'FTPerceiver',
 ]
