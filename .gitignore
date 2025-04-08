@@ -22,3 +22,4 @@ catboost_info/
 .pt_tmp/
 *.pt
 output/
+data/
