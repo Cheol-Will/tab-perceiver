@@ -100,7 +100,7 @@ class FTPerceiver(Module):
 
         self.latent_encoder_query = Parameter(torch.empty(num_latent_array, latent_channels))
         self.latent_decoder_query = Parameter(torch.empty(out_channels, latent_channels)) # output shape of C x 1 
-        # in benchmark setting out_channels == num_classes
+        # In pytorch frame benchmark setting, out_channels == num_classes
         
         # cross attention for latent encoder query
         self.latent_encoder = MultiheadAttention(latent_channels, num_heads, input_kdim=channels)
@@ -132,13 +132,14 @@ class FTPerceiver(Module):
         x, _ = self.latent_encoder(latent_encoder_query, x, x)
         
         # column-wise interaction (technically, latent interaction)
+        # FTTransformer uses x_cls for prediction, but here we just use other tokens with decoder query array.
         x, x_cls = self.backbone(x)
 
         # decode latent into decoder query shape (batch_size, num_classes, K)
         latent_decoder_query = self.latent_decoder_query.repeat(batch_size, 1, 1)
         x, _ = self.decoder(latent_decoder_query, x, x)
 
-        # project it into (batch_size, num_classes, 1)
-        x = self.proj(x)
+        # project it into (batch_size, num_classes, 1) -> (batch_size, num_classes)
+        x = self.proj(x).reshape(batch_size, -1)
 
         return x
