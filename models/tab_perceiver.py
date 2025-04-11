@@ -20,13 +20,11 @@ from torch_frame.nn.encoder.stype_encoder import (
 )
 from torch_frame.nn.encoder.stypewise_encoder import StypeWiseFeatureEncoder
 
-def attend(q, k, v, dropout_prob=0.0):
+def attend(q, k, dropout_prob=0.0, train=True):
     batch_size, num_heads, seq_len, head_dim = q.shape
     
     attention = F.softmax(torch.einsum("bhqd,bhkd->bhqk", q, k) / (head_dim**(0.5)), dim=-1) 
-    attention = torch.dropout(attention, dropout_prob, train=True)
-    # weighted_v = torch.einsum("bhqk,bhkd->bqhd", attention, v) 
-    # weighted_v = weighted_v.reshape(batch_size, seq_len, -1) 
+    attention = F.dropout(attention, p=dropout_prob, training=train)
     return attention
 
 
@@ -103,7 +101,7 @@ class Attention(Module):
         K = self._key(key).reshape(B, -1, H, head_dim).transpose(1,2)
         V = self._value(value).reshape(B, -1, H, head_dim).transpose(1,2)
 
-        A = attend(Q, K, V, self.dropout_prob)
+        A = attend(Q, K, self.dropout_prob, self.training)
         out = torch.einsum("bhqk,bhkd->bqhd", A, V) 
         out = out.reshape(B, N, -1) 
         out = self.proj(out)
