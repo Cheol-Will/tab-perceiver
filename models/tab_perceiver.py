@@ -25,8 +25,9 @@ def attend(q, k, v, dropout_prob=0.0):
     
     attention = F.softmax(torch.einsum("bhij,bhkj->bhik", q, k) / (head_dim**(0.5)), dim=-1) 
     attention = torch.dropout(attention, dropout_prob, train=True)
-    weighted_v = torch.einsum("bhij,bhjk->bhik", attention, v) 
-    weighted_v = v.transpose(1, 2).reshape(batch_size, seq_len, num_heads * head_dim) # (batch, seq_qeury, head, head_dim) -> (batch_size, seq_query, hidden_dim)
+    weighted_v = torch.einsum("bhqk,bhkd->bhqd", attention, v) 
+    weighted_v = weighted_v.reshape(batch_size, seq_len, -1) 
+
     return weighted_v
 
 
@@ -39,9 +40,10 @@ class MLP(Module):
         mlp_ratio: int,
         dropout_prob: float = 0.0,
     ):
+        super(MLP, self).__init__()
 
         self.fc1 = Linear(hidden_dim, hidden_dim*mlp_ratio)
-        self.act = GeLU()
+        self.act = GELU()
         self.drop1 = Dropout(dropout_prob)
         self.norm = LayerNorm(hidden_dim*mlp_ratio)
         self.fc2 = Linear(hidden_dim*mlp_ratio, hidden_dim)
@@ -76,7 +78,8 @@ class Attention(Module):
 
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads 
-        
+        self.dropout_prob = dropout_prob
+
         self._query = Linear(input_qdim, hidden_dim)
         self._key = Linear(input_kdim, hidden_dim)
         self._value = Linear(input_kdim, hidden_dim)  
@@ -156,8 +159,8 @@ class CrossAttention(Module):
         self.attention = Attention(hidden_dim, num_heads, input_qdim, input_kdim, dropout_prob)
         self.mlp = MLP(hidden_dim, mlp_ratio, dropout_prob)    
 
-        self.q_norm = LayerNorm(hidden_dim)
-        self.kv_norm = LayerNorm(hidden_dim)
+        self.q_norm = LayerNorm(input_qdim)
+        self.kv_norm = LayerNorm(input_kdim)
         self.mlp_norm = LayerNorm(hidden_dim)
 
     def forward(self, query, key):
@@ -177,12 +180,13 @@ class TabPerceiver(Module):
         num_layers: int,
         num_latent_array: int,
         latent_channels: int,
+        dropout_prob: float,
         col_stats: dict[str, dict[StatType, Any]],
         col_names_dict: dict[torch_frame.stype, list[str]],
         stype_encoder_dict: dict[torch_frame.stype, StypeEncoder]
         | None = None,
     ) -> None:
-        super().__init__()
+        super(TabPerceiver, self).__init__()
 
         if stype_encoder_dict is None:
             stype_encoder_dict = {
@@ -202,13 +206,19 @@ class TabPerceiver(Module):
         self.q_decoder = Parameter(torch.empty(latent_channels)) 
 
         # cross attention for latent encoder query
-        self.encoder = CrossAttention(latent_channels, num_heads, input_kdim=channels)
+        self.encoder = CrossAttention(
+            hidden_dim=latent_channels, 
+            num_heads=num_heads, 
+            input_kdim=channels,
+            mlp_ratio=4,
+            dropout_prob=dropout_prob,
+            )
         self.blocks = Sequential(
             *[SelfAttention(
                 hidden_dim=latent_channels, 
                 num_heads=num_heads,
                 mlp_ratio=4,
-                dropout_prob=0.2,
+                dropout_prob=dropout_prob,
             )
             for _ in range(num_layers)]
         )
@@ -217,20 +227,15 @@ class TabPerceiver(Module):
             hidden_dim=latent_channels,
             num_heads=num_heads,
             mlp_ratio=4,
-            dropout_prob=0.2,
+            dropout_prob=dropout_prob,
         )
         self.proj = Sequential(
             LayerNorm(latent_channels),
-            Linear(1, out_channels)
+            Linear(latent_channels, out_channels)
         )
 
     def reset_parameters(self) -> None:
-        self.etf_ncoder.reset_parameters()
-        # self.latent_encoder.reset_parameters()
-        self.backbone.reset_parameters()
-        for m in self.proj:
-            if not isinstance(m, GELU):
-                m.reset_parameters()
+        self.tf_encoder.reset_parameters()
 
     def forward(self, tf):
         # pre-processing with shape (batch_size, colummns, 1)
@@ -240,16 +245,15 @@ class TabPerceiver(Module):
 
         # Encode input into latent of shape (batch_size, N, K) where N, K are hyperparamters of latent space.
         q_encoder = self.q_encoder.repeat(batch_size, 1, 1)
-        x = self.encoder(q_encoder, x, x)
+        x = self.encoder(q_encoder, x)
         
         # Multihead Attention
-        x, x_cls = self.blocks(x)
+        x = self.blocks(x)
 
         # decode latent into decoder query shape (batch_size, num_classes, K)
-        latent_decoder_query = self.latent_decoder_query.repeat(batch_size, 1, 1)
-        x = self.decoder(latent_decoder_query, x, x)
+        q_decoder = self.q_decoder.repeat(batch_size, 1, 1)
+        x = self.decoder(q_decoder, x).reshape(batch_size, -1)
 
-        # project it into (batch_size, num_classes, 1) -> (batch_size, num_classes)
-        x = self.proj(x).reshape(batch_size, -1)
-
+        # projection: (batch_size, hidden_dim) -> (batch_size, num_classes)
+        x = self.proj(x)
         return x
