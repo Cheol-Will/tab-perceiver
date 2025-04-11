@@ -23,9 +23,9 @@ from torch_frame.nn.encoder.stypewise_encoder import StypeWiseFeatureEncoder
 def attend(q, k, v, dropout_prob=0.0):
     batch_size, num_heads, seq_len, head_dim = q.shape
     
-    attention = F.softmax(torch.einsum("bhij,bhkj->bhik", q, k) / (head_dim**(0.5)), dim=-1) 
+    attention = F.softmax(torch.einsum("bhqd,bhkd->bhqk", q, k) / (head_dim**(0.5)), dim=-1) 
     attention = torch.dropout(attention, dropout_prob, train=True)
-    weighted_v = torch.einsum("bhqk,bhkd->bhqd", attention, v) 
+    weighted_v = torch.einsum("bhqk,bhkd->bqhd", attention, v) 
     weighted_v = weighted_v.reshape(batch_size, seq_len, -1) 
 
     return weighted_v
@@ -172,6 +172,17 @@ class CrossAttention(Module):
 
 
 class TabPerceiver(Module):
+    """
+    Args: 
+        channels (int): Tensor frame embedding dimensionality.
+        out_channels (int): Number of classes.
+        num_heads (int): Number of attention heads.
+        num_layers (int): Number of transformer blocks.
+        num_latent_array (int): Number of latent array.
+        latent_channels (int): Latent space dimensionality.
+        dropout_prob (float): dropout probability
+    """
+
     def __init__(
         self,
         channels: int,
@@ -194,7 +205,7 @@ class TabPerceiver(Module):
                 stype.numerical: LinearEncoder(),
             }
         
-        self.tf_encoder = StypeWiseFeatureEncoder(
+        self.tensor_frame_encoder = StypeWiseFeatureEncoder(
             out_channels=channels,
             col_stats=col_stats,
             col_names_dict=col_names_dict,
@@ -202,8 +213,8 @@ class TabPerceiver(Module):
         )
         
         # Encoder and Decoder query with shape of (N, D) and (1, D)
-        self.q_encoder = Parameter(torch.empty(num_latent_array, latent_channels))
-        self.q_decoder = Parameter(torch.empty(latent_channels)) 
+        self.encoder_query = Parameter(torch.empty(num_latent_array, latent_channels))
+        self.decoder_query = Parameter(torch.empty(1, latent_channels)) 
 
         # cross attention for latent encoder query
         self.encoder = CrossAttention(
@@ -222,7 +233,6 @@ class TabPerceiver(Module):
             )
             for _ in range(num_layers)]
         )
-        
         self.decoder = CrossAttention(
             hidden_dim=latent_channels,
             num_heads=num_heads,
@@ -235,24 +245,31 @@ class TabPerceiver(Module):
         )
 
     def reset_parameters(self) -> None:
-        self.tf_encoder.reset_parameters()
+        # tensor_frame embedding parameter reset
+        self.tensor_frame_encoder.reset_parameters()
+
+        # truncated normal with std=0.02(default) from PerceiverIO 
+        nn.init.trunc_normal_(self.encoder_query, std=0.02)
+        nn.init.trunc_normal_(self.decoder_query, std=0.02)
+
+        # add weight initialization
 
     def forward(self, tf):
         # pre-processing with shape (batch_size, colummns, 1)
         # batch_size = tf.__len__()
         batch_size = len(tf)
-        x, _ = self.tf_encoder(tf)
+        x, _ = self.tensor_frame_encoder(tf)
 
         # Encode input into latent of shape (batch_size, N, K) where N, K are hyperparamters of latent space.
-        q_encoder = self.q_encoder.repeat(batch_size, 1, 1)
-        x = self.encoder(q_encoder, x)
+        encoder_query = self.encoder_query.repeat(batch_size, 1, 1)
+        x = self.encoder(encoder_query, x)
         
         # Multihead Attention
         x = self.blocks(x)
 
         # decode latent into decoder query shape (batch_size, num_classes, K)
-        q_decoder = self.q_decoder.repeat(batch_size, 1, 1)
-        x = self.decoder(q_decoder, x).reshape(batch_size, -1)
+        decoder_query = self.decoder_query.repeat(batch_size, 1, 1)
+        x = self.decoder(decoder_query, x).reshape(batch_size, -1)
 
         # projection: (batch_size, hidden_dim) -> (batch_size, num_classes)
         x = self.proj(x)
