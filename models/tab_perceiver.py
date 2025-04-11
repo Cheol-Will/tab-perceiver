@@ -25,10 +25,9 @@ def attend(q, k, v, dropout_prob=0.0):
     
     attention = F.softmax(torch.einsum("bhqd,bhkd->bhqk", q, k) / (head_dim**(0.5)), dim=-1) 
     attention = torch.dropout(attention, dropout_prob, train=True)
-    weighted_v = torch.einsum("bhqk,bhkd->bqhd", attention, v) 
-    weighted_v = weighted_v.reshape(batch_size, seq_len, -1) 
-
-    return weighted_v
+    # weighted_v = torch.einsum("bhqk,bhkd->bqhd", attention, v) 
+    # weighted_v = weighted_v.reshape(batch_size, seq_len, -1) 
+    return attention
 
 
 class MLP(Module):
@@ -84,8 +83,6 @@ class Attention(Module):
         self._key = Linear(input_kdim, hidden_dim)
         self._value = Linear(input_kdim, hidden_dim)  
         self.proj = Linear(hidden_dim, hidden_dim)
-        self.qnorm = LayerNorm(self.head_dim)
-        self.knorm = LayerNorm(self.head_dim)
         
     def forward(self, query, key=None, value=None):
         if key is None:
@@ -105,9 +102,10 @@ class Attention(Module):
         Q = self._query(query).reshape(B, -1, H, head_dim).transpose(1,2)
         K = self._key(key).reshape(B, -1, H, head_dim).transpose(1,2)
         V = self._value(value).reshape(B, -1, H, head_dim).transpose(1,2)
-        Q, K = self.qnorm(Q), self.knorm(K)
 
-        out = attend(Q, K, V, self.dropout_prob)
+        A = attend(Q, K, V, self.dropout_prob)
+        out = torch.einsum("bhqk,bhkd->bqhd", A, V) 
+        out = out.reshape(B, N, -1) 
         out = self.proj(out)
         return out
 
@@ -172,17 +170,6 @@ class CrossAttention(Module):
 
 
 class TabPerceiver(Module):
-    """
-    Args: 
-        channels (int): Tensor frame embedding dimensionality.
-        out_channels (int): Number of classes.
-        num_heads (int): Number of attention heads.
-        num_layers (int): Number of transformer blocks.
-        num_latent_array (int): Number of latent array.
-        latent_channels (int): Latent space dimensionality.
-        dropout_prob (float): dropout probability
-    """
-
     def __init__(
         self,
         channels: int,
@@ -260,17 +247,15 @@ class TabPerceiver(Module):
         batch_size = len(tf)
         x, _ = self.tensor_frame_encoder(tf)
 
-        # Encode input into latent of shape (batch_size, N, K) where N, K are hyperparamters of latent space.
+        # Encode input into latent of shape (batch_size, N, K) 
         encoder_query = self.encoder_query.repeat(batch_size, 1, 1)
         x = self.encoder(encoder_query, x)
         
         # Multihead Attention
         x = self.blocks(x)
 
-        # decode latent into decoder query shape (batch_size, num_classes, K)
+        # Decode and projection: (batch_size, hidden_dim) -> (batch_size, num_classes)
         decoder_query = self.decoder_query.repeat(batch_size, 1, 1)
         x = self.decoder(decoder_query, x).reshape(batch_size, -1)
-
-        # projection: (batch_size, hidden_dim) -> (batch_size, num_classes)
         x = self.proj(x)
         return x
