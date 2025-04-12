@@ -20,12 +20,13 @@ from torch_frame.nn.encoder.stype_encoder import (
 )
 from torch_frame.nn.encoder.stypewise_encoder import StypeWiseFeatureEncoder
 
-def attend(q, k, dropout_prob=0.0, train=True):
-    batch_size, num_heads, seq_len, head_dim = q.shape
+def attend(query, key, value, dropout_prob=0.0, train=True):
+    batch_size, num_heads, query_len, head_dim = query.shape
     
-    attention = F.softmax(torch.einsum("bhqd,bhkd->bhqk", q, k) / (head_dim**(0.5)), dim=-1) 
+    attention = F.softmax(torch.einsum("bhqd,bhkd->bhqk", query, key) / (head_dim**(0.5)), dim=-1) 
     attention = F.dropout(attention, p=dropout_prob, training=train)
-    return attention
+    weighted_sum = torch.einsum("bhqk,bhkd->bqhd", attention, value) # (batch_size, num_heads, query_len, head_dim)
+    return weighted_sum
 
 
 class MLP(Module):
@@ -101,9 +102,9 @@ class Attention(Module):
         K = self._key(key).reshape(B, -1, H, head_dim).transpose(1,2)
         V = self._value(value).reshape(B, -1, H, head_dim).transpose(1,2)
 
-        A = attend(Q, K, self.dropout_prob, self.training)
-        out = torch.einsum("bhqk,bhkd->bqhd", A, V) 
-        out = out.reshape(B, N, -1) 
+        # (B, H, N, D') -> (B, N, H, D') -> (B, N, D)
+        out = attend(Q, K, V, self.dropout_prob, self.training)
+        out = out.permute(0, 2, 1, 3).reshape(B, N, -1)
         out = self.proj(out)
         return out
 
