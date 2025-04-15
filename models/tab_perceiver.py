@@ -161,9 +161,7 @@ class CrossAttention(Module):
         self.mlp_norm = LayerNorm(hidden_dim)
 
     def forward(self, query, key):
-        x = self.q_norm(query)
-        key = self.kv_norm(key)
-        x = x + self.attention(x, key)
+        x = query + self.attention(self.q_norm(query), self.kv_norm(key))
         x = x + self.mlp(self.mlp_norm(x))
         return x
 
