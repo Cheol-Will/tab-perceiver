@@ -8,7 +8,7 @@ def load_result():
     # task_types = ["binary_classification", "regression", "multiclass_classification"]
     task_type = "binary_classification"
     scale_types = ["small", "medium", "large"]
-    model_types = ["LightGBM", "FTPerceiver", "FTTransformer", "TabNet", "ResNet"]
+    model_types = ["LightGBM", "TabPerceiver", "TabNet", "FTTransformer", "ResNet", "TabTransformer", "Trompt", "ExcelFormer"]
 
     result_list = []
 
@@ -48,7 +48,7 @@ def plot_result(result_list, task_type):
 
     model_types = [model_type for model_type in model_cols if model_type != "LightGBM"]
 
-    plt.figure(figsize=(8, 8))
+    plt.figure(figsize=(9, 9))
     x = np.linspace(0.5, 1.0, 500)
     y = x
     plt.fill_between(x, y, 1.0, color='blue', alpha=0.1)  # LightGBM better
@@ -60,17 +60,18 @@ def plot_result(result_list, task_type):
             pivot_df[model_type],
             pivot_df["LightGBM"],
             label=model_type,
-            s=60,
-            alpha=0.8
+            s=240,
+            alpha=0.8,
+            marker="X"
         )
 
     plt.text(0.52, 0.97, "LightGBM Better", fontsize=24, fontweight='bold', color='blue')
     plt.text(0.72, 0.53, "Deep model Better", fontsize=24, fontweight='bold', color='red')
 
-    plt.xlabel("ROC-AUC for deep tabular models", fontsize=24)
-    plt.ylabel("ROC-AUC for LightGBM", fontsize=24)
-    plt.title(f"Deep Models vs LightGBM across {task_type} Task", fontsize=18)
-    plt.legend()
+    plt.xlabel("ROC-AUC for deep tabular models", fontsize=32)
+    plt.ylabel("ROC-AUC for LightGBM", fontsize=32)
+    plt.title(f"Deep Models vs LightGBM across {task_type} Task", fontsize=20)
+    plt.legend(loc='center right', fontsize=20)
     plt.grid(True)
     plt.tight_layout()
 
@@ -78,3 +79,6 @@ def plot_result(result_list, task_type):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     plt.savefig(path, dpi=300)
     plt.show()
+
+def dataframe_result():
+    pass

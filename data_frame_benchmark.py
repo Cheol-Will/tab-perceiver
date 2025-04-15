@@ -244,11 +244,10 @@ else:
 
     elif args.model_type == 'TabPerceiver':
         model_search_space = {
-            'channels': [1, 4, 16],
-            'num_layers': [4, 6, 8],
             'num_heads': [4, 8],
-            'num_latent_array': [8],
-            'latent_channels': [16, 32, 64, 128],
+            'num_layers': [4, 6, 8],
+            'num_latents': [4, 8, 16, 32],
+            'hidden_dim': [32, 64, 128, 256],
             'dropout_prob': [0, 0.2],
         }
         train_search_space = {
