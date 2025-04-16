@@ -12,7 +12,6 @@ import torch.nn.functional as F
 import torch_frame
 from torch_frame import TensorFrame, stype
 from torch_frame.data.stats import StatType
-from torch_frame.nn.conv import FTTransformerConvs
 from torch_frame.nn.encoder.stype_encoder import (
     EmbeddingEncoder,
     LinearEncoder,
@@ -165,6 +164,13 @@ class CrossAttention(Module):
         x = x + self.mlp(self.mlp_norm(x))
         return x
 
+# class PositionEncoding(nn.Module):
+#     def __init__(
+#         self,
+#     ):
+
+#         pass
+#     def fo
 
 class TabPerceiver(Module):
     r"""
@@ -179,6 +185,7 @@ class TabPerceiver(Module):
     def __init__(
         self,
         out_channels: int,
+        num_features: int,
         num_heads: int,
         num_layers: int,
         num_latents: int,
@@ -197,18 +204,19 @@ class TabPerceiver(Module):
                 stype.numerical: LinearEncoder(),
             }
         
+        # (num_features, 1) -> (num_features, hidden_dim) 
         self.tensor_frame_encoder = StypeWiseFeatureEncoder(
             out_channels=hidden_dim,
             col_stats=col_stats,
             col_names_dict=col_names_dict,
             stype_encoder_dict=stype_encoder_dict,
         )
+        # Positional embedding 
+        self.pos_embedding = nn.Parameter(nn.init.normal_(torch.empty(1, num_features, hidden_dim)))
         
-        # Encoder and Decoder query with shape of (1, N, D) and (1, 1, D)
+        # Latents and Decoder query with shape of (1, N, D) and (1, 1, D)
         self.latents = Parameter(torch.empty(1, num_latents, hidden_dim))
         self.queries = Parameter(torch.empty(1, 1, hidden_dim)) 
-
-        # cross attention for latent encoder query
         self.encoder = CrossAttention(
             hidden_dim=hidden_dim, 
             num_heads=num_heads, 
@@ -249,16 +257,16 @@ class TabPerceiver(Module):
 
 
     def forward(self, tf):
-        # pre-processing with shape (batch_size, colummns, 1)
-        # batch_size = tf.__len__()
+        # pre-processing with shape (batch_size, num_colummns, hidden_dim)
         batch_size = len(tf)
         x, _ = self.tensor_frame_encoder(tf)
+        x = x + self.pos_embedding
 
-        # Encode input into latent of shape (batch_size, N, K) 
+        # Encode input into latent of shape (batch_size, num_latents, hidden_dim) 
         latents = self.latents.repeat(batch_size, 1, 1)
         x = self.encoder(latents, x)
         
-        # Multihead Attention
+        # Transformer Blocks
         x = self.blocks(x)
 
         # Decode and projection: (batch_size, hidden_dim) -> (batch_size, num_classes)
