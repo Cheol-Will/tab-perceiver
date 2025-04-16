@@ -9,7 +9,7 @@ import numpy as np
 import optuna
 import torch
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, Module, MSELoss
-from torch.nn import LayerNorm, Linear, Sequential
+from torch.nn import LayerNorm, Linear, Sequential, Parameter
 from torch.optim.lr_scheduler import ExponentialLR
 from torchmetrics import AUROC, Accuracy, MeanSquaredError
 from tqdm import tqdm
@@ -118,34 +118,39 @@ def main(args):
                 col_names_dict=col_names_dict,
                 stype_encoder_dict=stype_encoder_dict,
             )
+            # make new decoder query
+            model.queries = Parameter(torch.empty(1, 1, hidden_dim))
+            torch.nn.init.trunc_normal_(model.queries, std=0.02)
+            
             # make new prediction head
             model.proj = Sequential(
                 LayerNorm(hidden_dim),
                 Linear(hidden_dim, num_classes)
             )           
 
-        # check if brand new layers are requires_grad = True
-        for name, params in model.named_parameters():
-            # if params.requires_grad:
-            print(name)
+        # check if new layers are requires_grad = True
+        # print(f"training {i}th dataset ")
+        # for name, params in model.named_parameters():
+        #     if params.requires_grad:
+        #         print(name)
 
-        # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        # lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
         
-        # best_val_metric = math.inf
-        # best_test_metric = math.inf
+        best_val_metric = math.inf
+        best_test_metric = math.inf
         
-        # for epoch in range(1, args.epoch + 1):
-        #     train_loss = train(model, train_loader, optimizer, epoch)
-        #     val_metric = test(model, val_loader)
+        for epoch in range(1, args.epoch + 1):
+            train_loss = train(model, train_loader, optimizer, epoch)
+            val_metric = test(model, valid_loader)
 
-        #     if val_metric < best_val_metric:
-        #         best_val_metric = val_metric
-        #         best_test_metric = test(model, test_loader)
-        #     lr_scheduler.step()
-        #     print(f'Train Loss: {train_loss:.4f}, Val: {val_metric:.4f}')
+            if val_metric < best_val_metric:
+                best_val_metric = val_metric
+                best_test_metric = test(model, test_loader)
+            lr_scheduler.step()
+            print(f'Train Loss: {train_loss:.4f}, Val: {val_metric:.4f}')
 
-        # print(f'Best val: {best_val_metric:.4f}, Best test: {best_test_metric:.4f}')
+        print(f'Best val: {best_val_metric:.4f}, Best test: {best_test_metric:.4f}')
 
 
 if __name__ == '__main__':
