@@ -327,6 +327,14 @@ def train_and_eval_with_cfg(
     train_cfg: dict[str, Any],
     trial: Optional[optuna.trial.Trial] = None,
 ) -> tuple[float, float]:
+    train_loader = DataLoader(train_tensor_frame,
+                              batch_size=train_cfg['batch_size'], shuffle=True,
+                              drop_last=True)
+    val_loader = DataLoader(val_tensor_frame,
+                            batch_size=train_cfg['batch_size'])
+    test_loader = DataLoader(test_tensor_frame,
+                             batch_size=train_cfg['batch_size'])
+    
     # Use model_cfg to set up training procedure
     if args.model_type == 'FTTransformerBucket':
         # Use LinearBucketEncoder instead
@@ -335,6 +343,14 @@ def train_and_eval_with_cfg(
             stype.numerical: LinearBucketEncoder(),
         }
         model_cfg['stype_encoder_dict'] = stype_encoder_dict
+
+    if args.model_type == 'TabPerceiver':
+        # calculate number of features for positonal embedding
+        num_features = 0
+        for k, v in col_names_dict.items():
+            num_features += len(v)
+        model_cfg['num_features'] = num_features
+    
     model = model_cls(
         **model_cfg,
         out_channels=out_channels,
@@ -345,13 +361,7 @@ def train_and_eval_with_cfg(
     # Use train_cfg to set up training procedure
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg['base_lr'])
     lr_scheduler = ExponentialLR(optimizer, gamma=train_cfg['gamma_rate'])
-    train_loader = DataLoader(train_tensor_frame,
-                              batch_size=train_cfg['batch_size'], shuffle=True,
-                              drop_last=True)
-    val_loader = DataLoader(val_tensor_frame,
-                            batch_size=train_cfg['batch_size'])
-    test_loader = DataLoader(test_tensor_frame,
-                             batch_size=train_cfg['batch_size'])
+    
 
     if higher_is_better:
         best_val_metric = 0
