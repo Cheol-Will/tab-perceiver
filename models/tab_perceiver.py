@@ -245,6 +245,11 @@ class TabPerceiver(Module):
         )
         self.reset_parameters()
 
+    def reset_parameters_finetune(self):
+        torch.nn.init.normal_(self.pos_embedding)
+        torch.nn.init.trunc_normal_(self.queries, std=0.02)
+        
+
     def reset_parameters(self) -> None:
         # tensor_frame embedding parameter reset
         self.tensor_frame_encoder.reset_parameters()
