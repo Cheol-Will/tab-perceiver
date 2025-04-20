@@ -46,6 +46,10 @@ class MLP(Module):
         self.fc2 = Linear(hidden_dim*mlp_ratio, hidden_dim)
         self.drop2 = Dropout(dropout_prob)
 
+    def reset_parameters(self):
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()
+
     def forward(self, x):
         x = self.fc1(x)
         x = self.act(x)
@@ -81,6 +85,12 @@ class Attention(Module):
         self._key = Linear(input_kdim, hidden_dim)
         self._value = Linear(input_kdim, hidden_dim)  
         self.proj = Linear(hidden_dim, hidden_dim)
+
+    def reset_parameters(self):
+        self._query.reset_parameters()
+        self._key.reset_parameters()
+        self._value.reset_parameters()
+        self.proj.reset_parameters()
         
     def forward(self, query, key=None, value=None):
         if key is None:
@@ -96,13 +106,13 @@ class Attention(Module):
         H = self.num_heads
         head_dim = self.head_dim
 
-        # (B, N, D) -> (B, N, H, D') -> (B, H, N, D')
+        # (batch_size, query_len, hidden_dim) -> (batch_size, num_heads, query_len, head_dim)
         Q = self._query(query).reshape(B, -1, H, head_dim).transpose(1,2)
         K = self._key(key).reshape(B, -1, H, head_dim).transpose(1,2)
         V = self._value(value).reshape(B, -1, H, head_dim).transpose(1,2)
 
-        # (B, H, N, D') -> (B, N, H, D') -> (B, N, D)
-        out = attend(Q, K, V, self.dropout_prob, self.training) # (batch_size, num_heads, query_len, head_dim)
+        # (batch_size, num_heads, query_len, head_dim) -> (batch_size, query_len, hidden_dim)
+        out = attend(Q, K, V, self.dropout_prob, self.training) 
         out = out.permute(0, 2, 1, 3).reshape(B, N, -1)
         out = self.proj(out)
         return out
@@ -127,6 +137,10 @@ class SelfAttention(Module):
         self.norm1 = LayerNorm(hidden_dim)
         self.mlp = MLP(hidden_dim, mlp_ratio, dropout_prob)    
         self.norm2 = LayerNorm(hidden_dim)
+
+    def reset_parameters(self):
+        self.attention.reset_parameters()
+        self.mlp.reset_parameters()
 
     def forward(self, x):
         x = x + self.attention(self.norm1(x))
@@ -159,18 +173,15 @@ class CrossAttention(Module):
         self.kv_norm = LayerNorm(input_kdim)
         self.mlp_norm = LayerNorm(hidden_dim)
 
+    def reset_parameters(self):
+        self.attention.reset_parameters()
+        self.mlp.reset_parameters()
+
     def forward(self, query, key):
         x = query + self.attention(self.q_norm(query), self.kv_norm(key))
         x = x + self.mlp(self.mlp_norm(x))
         return x
 
-# class PositionEncoding(nn.Module):
-#     def __init__(
-#         self,
-#     ):
-
-#         pass
-#     def fo
 
 class TabPerceiver(Module):
     r"""
@@ -197,12 +208,12 @@ class TabPerceiver(Module):
         | None = None,
     ) -> None:
         super(TabPerceiver, self).__init__()
-
+        self.hidden_dim = hidden_dim
         if stype_encoder_dict is None:
             stype_encoder_dict = {
                 stype.categorical: EmbeddingEncoder(),
                 stype.numerical: LinearEncoder(),
-            }
+        }
         
         # (num_features, 1) -> (num_features, hidden_dim) 
         self.tensor_frame_encoder = StypeWiseFeatureEncoder(
@@ -212,7 +223,7 @@ class TabPerceiver(Module):
             stype_encoder_dict=stype_encoder_dict,
         )
         # Positional embedding 
-        self.pos_embedding = nn.Parameter(nn.init.normal_(torch.empty(1, num_features, hidden_dim)))
+        self.pos_embedding = nn.Parameter(torch.empty(1, num_features, hidden_dim))
         
         # Latents and Decoder query with shape of (1, N, D) and (1, 1, D)
         self.latents = Parameter(torch.empty(1, num_latents, hidden_dim))
@@ -223,7 +234,7 @@ class TabPerceiver(Module):
             input_kdim=hidden_dim,
             mlp_ratio=4,
             dropout_prob=dropout_prob,
-            )
+        )
         self.blocks = Sequential(
             *[SelfAttention(
                 hidden_dim=hidden_dim, 
@@ -244,22 +255,24 @@ class TabPerceiver(Module):
             Linear(hidden_dim, out_channels)
         )
         self.reset_parameters()
-
-    def reset_parameters_finetune(self):
-        torch.nn.init.normal_(self.pos_embedding)
-        torch.nn.init.trunc_normal_(self.queries, std=0.02)
         
-
     def reset_parameters(self) -> None:
         # tensor_frame embedding parameter reset
         self.tensor_frame_encoder.reset_parameters()
 
         # truncated normal with std=0.02(default) from PerceiverIO 
+        nn.init.normal_(self.pos_embedding)
         nn.init.trunc_normal_(self.latents, std=0.02)
         nn.init.trunc_normal_(self.queries, std=0.02)
 
-        # add weight initialization for transformer
+        self.encoder.reset_parameters()
+        self.decoder.reset_parameters()
 
+        for block in self.blocks:
+            block.reset_parameters()
+
+        self.proj[0].reset_parameters()
+        self.proj[1].reset_parameters()
 
     def forward(self, tf):
         # pre-processing with shape (batch_size, num_colummns, hidden_dim)
@@ -279,3 +292,43 @@ class TabPerceiver(Module):
         x = self.decoder(queries, x).reshape(batch_size, -1)
         x = self.proj(x)
         return x
+
+
+class TabPerceiverTransfer(TabPerceiver):
+    def reconstructIO(
+        self,
+        out_channels: int,
+        num_features: int,
+        col_stats: dict[str, dict[StatType, Any]],
+        col_names_dict: dict[torch_frame.stype, list[str]],
+    ):
+        stype_encoder_dict = {
+            stype.categorical: EmbeddingEncoder(),
+            stype.numerical: LinearEncoder(),
+        }
+        self.tensor_frame_encoder = StypeWiseFeatureEncoder(
+            out_channels=out_channels,
+            col_stats=col_stats,
+            col_names_dict=col_names_dict,
+            stype_encoder_dict=stype_encoder_dict,
+        )
+        self.pos_embedding = Parameter(torch.empty(1, num_features, self.hidden_dim))
+        self.proj = Sequential(
+            LayerNorm(self.hidden_dim),
+            Linear(self.hidden_dim, out_channels)
+        )           
+        self.freeze_transformer()
+        self.reset_parameters_finetune()
+
+    def freeze_transformer(self):
+        # freeze transformer blocks
+        for param in self.blocks.parameters():
+            param.requires_grad = False
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def reset_parameters_finetune(self):
+        self.tensor_frame_encoder.reset_parameters()
+        torch.nn.init.normal_(self.pos_embedding)
+        self.proj[0].reset_parameters()
+        self.proj[1].reset_parameters()
