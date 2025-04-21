@@ -4,13 +4,11 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-
-from torch import Tensor
 from torch.nn import LayerNorm, Linear, Module, GELU, Sequential, Parameter, Dropout
 import torch.nn.functional as F
 
 import torch_frame
-from torch_frame import TensorFrame, stype
+from torch_frame import stype
 from torch_frame.data.stats import StatType
 from torch_frame.nn.encoder.stype_encoder import (
     EmbeddingEncoder,
@@ -225,7 +223,7 @@ class TabPerceiver(Module):
         # Positional embedding 
         self.pos_embedding = nn.Parameter(torch.empty(1, num_features, hidden_dim))
         
-        # Latents and Decoder query with shape of (1, N, D) and (1, 1, D)
+        # Latents and Decoder query
         self.latents = Parameter(torch.empty(1, num_latents, hidden_dim))
         self.queries = Parameter(torch.empty(1, 1, hidden_dim)) 
         self.encoder = CrossAttention(
@@ -257,22 +255,17 @@ class TabPerceiver(Module):
         self.reset_parameters()
         
     def reset_parameters(self) -> None:
-        # tensor_frame embedding parameter reset
         self.tensor_frame_encoder.reset_parameters()
-
-        # truncated normal with std=0.02(default) from PerceiverIO 
+        self.encoder.reset_parameters()
+        self.decoder.reset_parameters()
+        self.proj[0].reset_parameters()
+        self.proj[1].reset_parameters()
         nn.init.normal_(self.pos_embedding)
         nn.init.trunc_normal_(self.latents, std=0.02)
         nn.init.trunc_normal_(self.queries, std=0.02)
 
-        self.encoder.reset_parameters()
-        self.decoder.reset_parameters()
-
         for block in self.blocks:
             block.reset_parameters()
-
-        self.proj[0].reset_parameters()
-        self.proj[1].reset_parameters()
 
     def forward(self, tf):
         # pre-processing with shape (batch_size, num_colummns, hidden_dim)
@@ -295,6 +288,9 @@ class TabPerceiver(Module):
 
 
 class TabPerceiverTransfer(TabPerceiver):
+    r"""
+        TabPerceiver for being trained on several datasets.
+    """
     def reconstructIO(
         self,
         out_channels: int,
@@ -302,6 +298,7 @@ class TabPerceiverTransfer(TabPerceiver):
         col_stats: dict[str, dict[StatType, Any]],
         col_names_dict: dict[torch_frame.stype, list[str]],
     ):
+        """ Reconstruct Input, Output layers, and positional encoding """
         stype_encoder_dict = {
             stype.categorical: EmbeddingEncoder(),
             stype.numerical: LinearEncoder(),
@@ -321,13 +318,18 @@ class TabPerceiverTransfer(TabPerceiver):
         self.reset_parameters_finetune()
 
     def freeze_transformer(self):
-        # freeze transformer blocks
-        for param in self.blocks.parameters():
-            param.requires_grad = False
+        """ Freeze Transformer blocks for finetuning """
         for param in self.encoder.parameters():
             param.requires_grad = False
-
+        for param in self.blocks.parameters():
+            param.requires_grad = False
+        for param in self.decoder.parameters():
+            param.requires_grad = False
+        self.latents.requires_grad = False
+        self.queries.requires_grad = False
+        
     def reset_parameters_finetune(self):
+        """ initialize re-defined parameters"""
         self.tensor_frame_encoder.reset_parameters()
         torch.nn.init.normal_(self.pos_embedding)
         self.proj[0].reset_parameters()
