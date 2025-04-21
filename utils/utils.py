@@ -1,6 +1,6 @@
 import math
-from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss, Module
-from torchmetrics import Accuracy, AUROC, MeanSquaredError, Metric
+from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
+from torchmetrics import Accuracy, AUROC, MeanSquaredError
 from torch_frame.typing import TaskType
 
 def create_train_setup(dataset):

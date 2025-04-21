@@ -1,7 +1,5 @@
 import argparse
-import math
 import os
-from typing import Any, Optional
 
 import torch
 from torch.nn import Module
@@ -103,9 +101,9 @@ def main(args):
     ).to(device)
 
     pretrain_data_count = 0
-    for task_type_name, dataset_indices_dict in dataset_index_ranges.items():
+    for task_type, dataset_indices_dict in dataset_index_ranges.items():
         for dataset_index in list(dataset_indices_dict[args.scale]):
-            data_name = f"{task_type_name}_{args.scale}_{dataset_index}"
+            data_name = f"{task_type}_{args.scale}_{dataset_index}"
 
             # build dataset
             if pretrain_data_count != 0:
@@ -172,6 +170,7 @@ def main(args):
     }
     os.makedirs(os.path.dirname(args.result_path), exist_ok=True)
     torch.save(checkpoint, args.result_path)
+    print(f"checkpoint is saved into {args.result_path}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
