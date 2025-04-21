@@ -17,16 +17,6 @@ from loaders import build_dataset, build_dataloader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def load_pretrained_weight(args, model):
-    checkpoint = torch.load(args.pretrained_weight_path)
-    transformer_keys = ['encooder', 'blocks', 'decoder']
-
-    # pretrained_dict = checkpoint.get('model_state_dict', checkpoint)
-    # model_dict = model.state_dict()
-
-    return checkpoint
-
-
 def train(
     model: Module,
     loader: DataLoader,
@@ -42,8 +32,6 @@ def train(
         tf = tf.to(device)
         y = tf.y
         pred = model(tf)
-        if torch.isnan(pred).any():
-            print("NAN in pred")
         if pred.size(1) == 1:
             pred = pred.view(-1, )
         if task_type == TaskType.BINARY_CLASSIFICATION:
@@ -86,52 +74,57 @@ def main(args):
     metric_computer.to(device)
 
     # define model using config and load pretrained weights
+    print(f"Load checkpoint from {args.pretrained_weight_path}")
     ckpt = torch.load(args.pretrained_weight_path)
     model_config = ckpt["model_config"]
-    model = TabPerceiverTransfer(**model_config).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])    
+    model = TabPerceiverTransfer(**model_config)
+    model.load_state_dict(ckpt["model_state_dict"]) 
+    model.freeze_transformer()   
     model.reconstructIO(
         out_channels=out_channels,
         num_features=meta_data["num_features"],
         col_stats=meta_data["col_stats"],
         col_names_dict=meta_data["col_names_dict"],
     )
+    model.to(device)
 
     # train and test    
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
     for epoch in range(args.epochs):
-        train_loss = train(model, train_loader, optimizer, loss_func, epoch, args.task_type)
-        val_metric = test(model, valid_loader, metric_computer, args.task_type)
-    
+        train_loss = train(model, train_loader, optimizer, loss_fun, epoch, task_type)
+        val_metric = test(model, valid_loader, metric_computer, task_type)
+        best_val_metric, best_test_metric = init_best_metric(higher_is_better) # regression: inf, classification: 0
+
         if higher_is_better:
             if val_metric > best_val_metric:
                     best_val_metric = val_metric
-                    best_test_metric = test(model, test_loader, metric_computer, args.task_type)
+                    best_test_metric = test(model, test_loader, metric_computer, task_type)
             else:
                 if val_metric < best_val_metric:
                     best_val_metric = val_metric
-                    best_test_metric = test(model, test_loader, metric_computer, args.task_type)
+                    best_test_metric = test(model, test_loader, metric_computer, task_type)
             lr_scheduler.step()
             
             print(f'Train Loss: {train_loss:.4f}, Val: {val_metric:.4f}')
     print(f"Best val: {best_val_metric:.4f}, Best test: {best_test_metric:.4f}")
 
     # save the result
-    model_config["out_channels"] = out_channels,
-    model_config["num_features"] = meta_data["num_features"],
-    model_config["col_stats"] = meta_data["col_stats"],
-    model_config["col_names_dict"] = meta_data["col_names_dict"],
-    data_name = f"{task_type_name}_{args.scale}_{dataset_index}"
+    model_config["out_channels"] = out_channels
+    model_config["num_features"] = meta_data["num_features"]
+    model_config["col_stats"] = meta_data["col_stats"]
+    model_config["col_names_dict"] = meta_data["col_names_dict"]
 
     checkpoint = {
+        'args': args.__dict__,
         "model_state_dict": model.state_dict(),
         "model_config": model_config,
         "best_val_metric": best_val_metric,
-        "best_test_metric": best_test_metric
+        "best_test_metric": best_test_metric,
     }
-
-
+    os.makedirs(os.path.dirname(args.result_path), exist_ok=True)
+    torch.save(checkpoint, args.result_path)
+    print(f"Save checkpoint into {args.result_path}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
