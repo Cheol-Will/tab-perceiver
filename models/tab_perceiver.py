@@ -307,7 +307,7 @@ class TabPerceiverTransfer(TabPerceiver):
             stype.numerical: LinearEncoder(),
         }
         self.tensor_frame_encoder = StypeWiseFeatureEncoder(
-            out_channels=out_channels,
+            out_channels=self.hidden_dim,
             col_stats=col_stats,
             col_names_dict=col_names_dict,
             stype_encoder_dict=stype_encoder_dict,

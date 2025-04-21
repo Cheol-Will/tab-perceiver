@@ -17,6 +17,16 @@ from loaders import build_dataset, build_dataloader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+def load_pretrained_weight(args, model):
+    checkpoint = torch.load(args.pretrained_weight_path)
+    transformer_keys = ['encooder', 'blocks', 'decoder']
+
+    # pretrained_dict = checkpoint.get('model_state_dict', checkpoint)
+    # model_dict = model.state_dict()
+
+    return checkpoint
+
+
 def train(
     model: Module,
     loader: DataLoader,
@@ -67,81 +77,61 @@ def test(
 
 
 def main(args):
-    """ train on first dataset and finetune on other datasets"""
-    torch.manual_seed(args.seed)
+    """ load pretrained TabPerceiver and finetune"""
 
-    num_heads = 8
-    num_layers = 8
-    num_latents = 8
-    hidden_dim = 32
-    dropout_prob = 0.2
-
-    dataset = build_dataset(args.task_type, dataset_scale="medium", dataset_index=0)
+    # build dataset
+    dataset = build_dataset(task_type=args.task_type, dataset_scale=args.scale, dataset_index=args.idx)
     train_loader, valid_loader, test_loader, meta_data = build_dataloader(dataset)
-    out_channels, loss_fun, metric_computer, higher_is_better = create_train_setup(dataset)
+    out_channels, loss_fun, metric_computer, higher_is_better, task_type = create_train_setup(dataset)
     metric_computer.to(device)
 
-    model = TabPerceiverTransfer(
-        out_channels=out_channels, 
+    # define model using config and load pretrained weights
+    ckpt = torch.load(args.pretrained_weight_path)
+    model_config = ckpt["model_config"]
+    model = TabPerceiverTransfer(**model_config).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])    
+    model.reconstructIO(
+        out_channels=out_channels,
         num_features=meta_data["num_features"],
-        num_heads=num_heads,
-        num_layers=num_layers,
-        num_latents=num_latents,
-        hidden_dim=hidden_dim,
-        dropout_prob=dropout_prob,
         col_stats=meta_data["col_stats"],
-        col_names_dict=meta_data["col_names_dict"]
-    ).to(device)
+        col_names_dict=meta_data["col_names_dict"],
+    )
 
-    result_dicts = {}
-    for i in range(3):
-
-        if i != 0:
-            dataset = build_dataset(task_type=args.task_type, dataset_scale=args.scale, dataset_index=i)
-            train_loader, valid_loader, test_loader, meta_data = build_dataloader(dataset)
-            out_channels, loss_fun, metric_computer, higher_is_better, task_type = create_train_setup(dataset)
-            metric_computer.to(device)
-
-            # reconstruct input and output layers
-            model.reconstructIO(
-                out_channels=out_channels,
-                num_features=meta_data["num_features"],
-                col_stats=meta_data["col_stats"],
-                col_names_dict=meta_data["col_names_dict"],
-            )
-            model.to(device)
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
-        best_val_metric, best_test_metric = init_best_metric(higher_is_better) # regression: inf, classification: 0
-            
-        for epoch in range(1, args.epochs + 1):
-            train_loss = train(model, train_loader, optimizer, loss_fun, epoch, task_type)
-            val_metric = test(model, valid_loader, metric_computer, task_type)
-
-            if higher_is_better:
-                if val_metric > best_val_metric:
+    # train and test    
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
+    for epoch in range(args.epochs):
+        train_loss = train(model, train_loader, optimizer, loss_func, epoch, args.task_type)
+        val_metric = test(model, valid_loader, metric_computer, args.task_type)
+    
+        if higher_is_better:
+            if val_metric > best_val_metric:
                     best_val_metric = val_metric
-                    best_test_metric = test(model, test_loader, metric_computer, task_type)
+                    best_test_metric = test(model, test_loader, metric_computer, args.task_type)
             else:
                 if val_metric < best_val_metric:
                     best_val_metric = val_metric
-                    best_test_metric = test(model, test_loader, metric_computer, task_type)
+                    best_test_metric = test(model, test_loader, metric_computer, args.task_type)
             lr_scheduler.step()
+            
             print(f'Train Loss: {train_loss:.4f}, Val: {val_metric:.4f}')
+    print(f"Best val: {best_val_metric:.4f}, Best test: {best_test_metric:.4f}")
 
-        print(f'Best val: {best_val_metric:.4f}, Best test: {best_test_metric:.4f}')
-        data_name = f"{args.task_type}_{args.scale}_{i}"
+    # save the result
+    model_config["out_channels"] = out_channels,
+    model_config["num_features"] = meta_data["num_features"],
+    model_config["col_stats"] = meta_data["col_stats"],
+    model_config["col_names_dict"] = meta_data["col_names_dict"],
+    data_name = f"{task_type_name}_{args.scale}_{dataset_index}"
 
-        result_dict = {
-            "args": args.__dict__, # same for all dataset
-            'best_val_metric': best_val_metric,
-            'best_test_metric': best_test_metric,
-        }
-        result_dicts[data_name] = result_dict
-    if args.result_path != '':
-        os.makedirs(os.path.dirname(args.result_path), exist_ok=True)
-        torch.save(result_dicts, args.result_path)
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "model_config": model_config,
+        "best_val_metric": best_val_metric,
+        "best_test_metric": best_test_metric
+    }
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -153,8 +143,10 @@ if __name__ == '__main__':
         ], default='binary_classification')
     parser.add_argument('--scale', type=str, choices=['small', 'medium', 'large'],
                         default='small')
+    parser.add_argument('--idx', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--pretrained_weight_path', type=str, default='')
     parser.add_argument('--result_path', type=str, default='')
     args = parser.parse_args()
     main(args)
