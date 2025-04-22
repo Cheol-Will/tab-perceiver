@@ -91,7 +91,8 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
     best_val_metric, best_test_metric = init_best_metric(higher_is_better) # regression: inf, classification: 0
-
+    print(f"higher is better: {higher_is_better}")
+    print(f"default metric: {best_val_metric}, {best_test_metric}")
     for epoch in range(args.epochs):
         train_loss = train(model, train_loader, optimizer, loss_fun, epoch, task_type)
         val_metric = test(model, valid_loader, metric_computer, task_type)
@@ -100,13 +101,14 @@ def main(args):
             if val_metric > best_val_metric:
                     best_val_metric = val_metric
                     best_test_metric = test(model, test_loader, metric_computer, task_type)
-            else:
-                if val_metric < best_val_metric:
-                    best_val_metric = val_metric
-                    best_test_metric = test(model, test_loader, metric_computer, task_type)
-            lr_scheduler.step()
+        else:
+            if val_metric < best_val_metric:
+                best_val_metric = val_metric
+                best_test_metric = test(model, test_loader, metric_computer, task_type)
+        lr_scheduler.step()
             
-            print(f'Train Loss: {train_loss:.4f}, Val: {val_metric:.4f}')
+        print(f'Train Loss: {train_loss:.4f}, Val: {val_metric:.4f}')
+        # print(f'Current best_test_metric: {best_test_metric:.4F}')
     print(f"Best val: {best_val_metric:.4f}, Best test: {best_test_metric:.4f}")
 
     # save the result
