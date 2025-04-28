@@ -91,7 +91,6 @@ def main(args):
     model = TabPerceiverMultiTask(
         **model_config,
         **meta_data,
-        num_tasks=num_tasks,
         num_classes=num_classes,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -116,7 +115,7 @@ def main(args):
         test_metric = test(model, test_loaders[task_idx], metric_computer, task_type, task_idx)
         result_list.append({
             f"{args.task_type}_{args.scale}_{task_idx}": {
-                "best_val_metric": test_metric
+                "best_test_metric": test_metric
             }
         })
     
