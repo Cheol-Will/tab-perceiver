@@ -23,6 +23,28 @@ def create_train_setup(dataset):
 
     return out_channels, loss_fun, metric_computer, higher_is_better, dataset.task_type
 
+def create_multitask_setup(datasets):
+    dataset = datasets[0]
+    if dataset.task_type == TaskType.BINARY_CLASSIFICATION:
+        num_classes_list = [1 for _ in range(len(datasets))]
+        loss_fun = BCEWithLogitsLoss()
+        metric_computer = AUROC(task='binary')
+        higher_is_better = True
+    elif dataset.task_type == TaskType.MULTICLASS_CLASSIFICATION:
+        num_classes_list = [dataset.num_classes for dataset in datasets]
+        loss_fun = CrossEntropyLoss()
+        metric_computer = Accuracy(task='multiclass',
+                                   num_classes=int(1e5))
+        # no need to specify num_classes
+        higher_is_better = True
+    elif dataset.task_type == TaskType.REGRESSION:
+        num_classes_list = [1 for _ in range(len(datasets))]
+        loss_fun = MSELoss()
+        metric_computer = MeanSquaredError(squared=False)
+        higher_is_better = False
+
+    return num_classes_list, loss_fun, metric_computer, higher_is_better, dataset.task_type
+
 
 def init_best_metric(higher_is_better):
     if higher_is_better:
