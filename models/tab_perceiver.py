@@ -32,21 +32,21 @@ class MLP(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
-        mlp_ratio: int,
+        mlp_ratio: float,
         dropout_prob: float = 0.0,
     ):
         super(MLP, self).__init__()
-
-        self.fc1 = nn.Linear(hidden_dim, hidden_dim*mlp_ratio)
+        inner_dim = int(hidden_dim*mlp_ratio)
+        self.fc1 = nn.Linear(hidden_dim, inner_dim)
         self.act = nn.GELU()
         self.drop1 = nn.Dropout(dropout_prob)
-        self.norm = nn.LayerNorm(hidden_dim*mlp_ratio)
-        self.fc2 = nn.Linear(hidden_dim*mlp_ratio, hidden_dim)
+        self.norm = nn.LayerNorm(inner_dim)
+        self.fc2 = nn.Linear(inner_dim, hidden_dim)
         self.drop2 = nn.Dropout(dropout_prob)
 
     def reset_parameters(self):
-        self.fc1.reset_parameters()
         self.fc2.reset_parameters()
+        self.fc1.reset_parameters()
 
     def forward(self, x):
         x = self.fc1(x)
@@ -123,7 +123,7 @@ class SelfAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
-        mlp_ratio: int,
+        mlp_ratio: float,
         input_dim: int = None,
         dropout_prob: float = 0.0,
     ):
@@ -153,7 +153,7 @@ class CrossAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
-        mlp_ratio: int,
+        mlp_ratio: float,
         input_qdim: int = None,
         dropout_prob: float = 0.0,
     ):
@@ -188,15 +188,16 @@ class TabPerceiver(nn.Module):
         num_layers (int): Number of self-attention layers
         num_latents (int): Number of latents
         hidden_dim (int): Embedding Dimensionality
+        mlp_ratio (float): Multiplier in MLP
     """
     def __init__(
         self,
         num_classes: int,
-        num_features: int,
         num_heads: int,
         num_layers: int,
         num_latents: int,
         hidden_dim: int,
+        mlp_ratio: float,
         dropout_prob: float,
         col_stats: dict[str, dict[StatType, Any]],
         col_names_dict: dict[torch_frame.stype, list[str]],
@@ -204,7 +205,9 @@ class TabPerceiver(nn.Module):
         | None = None,
     ) -> None:
         super(TabPerceiver, self).__init__()
+
         self.hidden_dim = hidden_dim
+        self.num_features = self.calculate_num_features(col_names_dict)
         if stype_encoder_dict is None:
             stype_encoder_dict = {
                 stype.categorical: EmbeddingEncoder(),
@@ -219,7 +222,7 @@ class TabPerceiver(nn.Module):
             stype_encoder_dict=stype_encoder_dict,
         )
         # Positional embedding 
-        self.pos_embedding = nn.Parameter(torch.empty(1, num_features, hidden_dim))
+        self.pos_embedding = nn.Parameter(torch.empty(1, self.num_features, hidden_dim))
         
         # Latents and Decoder query with shape of (1, N, D) and (1, 1, D)
         self.latents = nn.Parameter(torch.empty(1, num_latents, hidden_dim))
@@ -227,14 +230,14 @@ class TabPerceiver(nn.Module):
         self.encoder = CrossAttention(
             hidden_dim=hidden_dim, 
             num_heads=num_heads, 
-            mlp_ratio=4,
+            mlp_ratio=mlp_ratio,
             dropout_prob=dropout_prob,
         )
         self.blocks = nn.Sequential(
             *[SelfAttention(
                 hidden_dim=hidden_dim, 
                 num_heads=num_heads,
-                mlp_ratio=4,
+                mlp_ratio=mlp_ratio,
                 dropout_prob=dropout_prob,
             )
             for _ in range(num_layers)]
@@ -242,7 +245,7 @@ class TabPerceiver(nn.Module):
         self.decoder = CrossAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            mlp_ratio=4,
+            mlp_ratio=mlp_ratio,
             dropout_prob=dropout_prob,
         )
         self.proj = nn.Sequential(
@@ -251,6 +254,12 @@ class TabPerceiver(nn.Module):
         )
         self.reset_parameters()
         
+    def calculate_num_features(self, col_names_dict):
+        num_features = 0
+        for k, v in col_names_dict.items():
+            num_features += len(v)
+        return num_features        
+
     def reset_parameters(self) -> None:
         # tensor_frame embedding parameter reset
         self.tensor_frame_encoder.reset_parameters()
@@ -292,7 +301,6 @@ class TabPerceiver(nn.Module):
 class TabPerceiverMultiTask(nn.Module):
     def __init__(
         self,
-        num_tasks,
         num_classes: list,
         num_heads: int,
         num_layers: int,
@@ -303,7 +311,7 @@ class TabPerceiverMultiTask(nn.Module):
         col_names_dicts: list,
     ):
         super(TabPerceiverMultiTask, self).__init__()
-        self.num_tasks = num_tasks
+        self.num_tasks = len(col_stats)
         num_features_list = self.calculate_num_features(col_names_dicts)
 
         self.tensor_frame_encoders = nn.ModuleList([
@@ -316,12 +324,12 @@ class TabPerceiverMultiTask(nn.Module):
                     stype.numerical: LinearEncoder(),
                 }
             )
-            for i in range(num_tasks)
+            for i in range(self.num_tasks)
         ])
-        self.pos_embeddings = nn.ParameterList([nn.Parameter(torch.empty(1, num_features_list[i], hidden_dim)) for i in range(num_tasks)])
+        self.pos_embeddings = nn.ParameterList([nn.Parameter(torch.empty(1, num_features_list[i], hidden_dim)) for i in range(self.num_tasks)])
         
         self.latents = nn.Parameter(torch.empty(1, num_latents, hidden_dim))
-        self.queries = nn.Parameter(torch.empty(1, 1, hidden_dim)) 
+        self.queries = nn.ParameterList([nn.Parameter(torch.empty(1, 1, hidden_dim)) for i in range(self.num_tasks)])
         self.encoder = CrossAttention(
             hidden_dim=hidden_dim, 
             num_heads=num_heads, 
@@ -346,7 +354,7 @@ class TabPerceiverMultiTask(nn.Module):
         
         self.projections = nn.ModuleList([
             nn.Linear(hidden_dim, num_classes[i])
-            for i in range(num_tasks)
+            for i in range(self.num_tasks)
         ])
         self.reset_parameters()
         
@@ -360,7 +368,8 @@ class TabPerceiverMultiTask(nn.Module):
             nn.init.normal_(pos_embedding)
 
         nn.init.trunc_normal_(self.latents, std=0.02)
-        nn.init.trunc_normal_(self.queries, std=0.02)
+        for query in self.queries:
+            nn.init.trunc_normal_(query, std=0.02)
 
         self.encoder.reset_parameters()
         self.decoder.reset_parameters()
@@ -390,7 +399,7 @@ class TabPerceiverMultiTask(nn.Module):
         x = self.encoder(latents, x)
         x = self.blocks(x)
 
-        queries = self.queries.repeat(batch_size, 1, 1)
+        queries = self.queries[task_idx].repeat(batch_size, 1, 1)
         x = self.decoder(queries, x).reshape(batch_size, -1)
         x = self.projections[task_idx](x)
         return x
