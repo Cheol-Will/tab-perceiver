@@ -24,17 +24,20 @@ def shuffle_task_index(dataloaders):
 
 def train(
     model: Module,
-    loader: DataLoader,
+    loaders,
     optimizer: torch.optim.Optimizer,
     loss_fun: Module,
     epoch: int,
     task_type,
-    task_idx, 
+    task_idx_list
 ) -> float:
     model.train()
     loss_accum = total_count = 0
 
-    for tf in tqdm(loader, desc=f'Epoch: {epoch}, Task Index: {task_idx}'):
+    loaders = [iter(loader) for loader in loaders]
+
+    for task_idx in tqdm(task_idx_list, desc=f'Epoch: {epoch}'):
+        tf = next(loaders[task_idx])    
         tf = tf.to(device)
         y = tf.y
         pred = model(tf, task_idx)
@@ -70,15 +73,14 @@ def test(
         metric_computer.update(pred, tf.y)
     return metric_computer.compute().item()
 
-
 def main(args):
     torch.manual_seed(args.seed)
     result_list = []
     model_config = {
         "num_heads": 8,
         "num_layers": 8,
-        "num_latents": 8,
-        "hidden_dim": 32,
+        "num_latents": 16,
+        "hidden_dim": 64,
         "dropout_prob": 0.2,
     }
 
@@ -96,18 +98,11 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     lr_scheduler = ExponentialLR(optimizer, gamma=0.9)
 
-    # manage best metric for each task
-    best_val_metric, best_test_metric = init_best_metric(higher_is_better) # regression: inf, classification: 0
-    best_val_metrics = [best_val_metric] * num_tasks 
-    best_test_metrics = [best_test_metric] * num_tasks
-    
-    for epoch in range(args.epochs):
-        task_idx = random.randint(0, num_tasks-1)
-        train_loss = train(model, train_loaders[task_idx], optimizer, loss_fun, epoch, task_type, task_idx)
-        val_metric = test(model, valid_loaders[task_idx], metric_computer, task_type, task_idx)
+    for epoch in range(args.epochs):        
+        task_idx_list = shuffle_task_index(train_loaders) # sample task_idx list
+        train_loss = train(model, train_loaders, optimizer, loss_fun, epoch, task_type, task_idx_list)
         lr_scheduler.step()
-        print(f"Task index: {task_idx}")
-        print(f"Train Loss: {train_loss:.7f}, Valid Metric: {val_metric:.7f}")
+        print(f"Train Loss: {train_loss:.7f}")
 
     # test on every task
     result_list = [] 
@@ -117,11 +112,11 @@ def main(args):
             f"{args.task_type}_{args.scale}_{task_idx}": {
                 "best_test_metric": test_metric
             }
-        })
-    
+        })                
+
     os.makedirs(os.path.dirname(args.result_path), exist_ok=True)
     torch.save(result_list, args.result_path)
-    print(f"Result list is saved into {args.result_path}")
+    print(f"Result_list is saved into {args.result_path}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -134,4 +129,3 @@ if __name__ == '__main__':
     parser.add_argument('--result_path', type=str, default='')
     args = parser.parse_args()
     main(args)
-
