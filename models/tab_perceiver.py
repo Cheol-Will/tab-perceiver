@@ -126,23 +126,38 @@ class SelfAttention(nn.Module):
         mlp_ratio: float,
         input_dim: int = None,
         dropout_prob: float = 0.0,
+        num_experts: int = None,
+        moe_ratio: float = None, 
     ):
         super(SelfAttention, self).__init__()
         if input_dim is None:
             input_dim = hidden_dim
+        self.num_experts = num_experts
 
         self.attention = Attention(hidden_dim, num_heads, input_dim, input_dim, dropout_prob)
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP(hidden_dim, mlp_ratio, dropout_prob)    
         self.norm2 = nn.LayerNorm(hidden_dim)
 
+        if num_experts is not None:
+            self.moe = nn.MoudleList([
+                MLP(hidden_dim, moe_ratio, dropout_prob)
+                for _ in range(num_experts)
+            ])
+
     def reset_parameters(self):
         self.attention.reset_parameters()
         self.mlp.reset_parameters()
 
-    def forward(self, x):
+        if self.num_experts is not None:
+            for mlp in self.moe:
+                mlp.reset_parameters()
+
+    def forward(self, x, expert_idx=None):
         x = x + self.attention(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
+        if expert_idx is not None:
+            x = x + self.moe[expert_idx](self.norm2(x))
         return x
 
 
@@ -156,12 +171,14 @@ class CrossAttention(nn.Module):
         mlp_ratio: float,
         input_qdim: int = None,
         dropout_prob: float = 0.0,
+        num_experts: int = None,
+        moe_ratio: float = None, 
     ):
         super(CrossAttention, self).__init__()
+        self.num_experts = num_experts
         if input_qdim is None:
             input_qdim = hidden_dim
 
-        
         self.attention = Attention(hidden_dim, num_heads, input_qdim, input_qdim, dropout_prob)
         self.mlp = MLP(hidden_dim, mlp_ratio, dropout_prob)    
 
@@ -169,13 +186,25 @@ class CrossAttention(nn.Module):
         self.kv_norm = nn.LayerNorm(input_qdim)
         self.mlp_norm = nn.LayerNorm(hidden_dim)
 
+        if num_experts is not None:
+            self.moe = nn.MoudleList([
+                MLP(hidden_dim, moe_ratio, dropout_prob)
+                for _ in range(num_experts)
+            ])
+
     def reset_parameters(self):
         self.attention.reset_parameters()
         self.mlp.reset_parameters()
 
-    def forward(self, query, key):
+        if self.num_experts is not None:
+            for mlp in self.moe:
+                mlp.reset_parameters()
+
+    def forward(self, query, key, expert_idx=None):
         x = query + self.attention(self.q_norm(query), self.kv_norm(key))
         x = x + self.mlp(self.mlp_norm(x))
+        if expert_idx is not None:
+            x = x + self.moe[expert_idx](self.mlp_norm(x))
         return x
 
 
@@ -309,11 +338,14 @@ class TabPerceiverMultiTask(nn.Module):
         dropout_prob: float,
         col_stats: list,
         col_names_dicts: list,
+        is_moe: bool = False,
     ):
         super(TabPerceiverMultiTask, self).__init__()
         self.num_tasks = len(col_stats)
+        self.is_moe = is_moe
+        num_experts = num_tasks if is_moe else None
         num_features_list = self.calculate_num_features(col_names_dicts)
-
+        
         self.tensor_frame_encoders = nn.ModuleList([
             StypeWiseFeatureEncoder(
                 out_channels=hidden_dim,
@@ -326,22 +358,40 @@ class TabPerceiverMultiTask(nn.Module):
             )
             for i in range(self.num_tasks)
         ])
-        self.pos_embeddings = nn.ParameterList([nn.Parameter(torch.empty(1, num_features_list[i], hidden_dim)) for i in range(self.num_tasks)])
+        self.pos_embeddings = nn.ParameterList([
+            nn.Parameter(torch.empty(1, num_features_list[i], hidden_dim)) 
+            for i in range(self.num_tasks)
+        ])
         
         self.latents = nn.Parameter(torch.empty(1, num_latents, hidden_dim))
-        self.queries = nn.ParameterList([nn.Parameter(torch.empty(1, 1, hidden_dim)) for i in range(self.num_tasks)])
+        self.queries = nn.ParameterList([
+            nn.Parameter(torch.empty(1, 1, hidden_dim)) 
+            for i in range(self.num_tasks)
+        ])
         self.encoder = CrossAttention(
             hidden_dim=hidden_dim, 
             num_heads=num_heads, 
             mlp_ratio=4,
             dropout_prob=dropout_prob,
+            num_experts=num_experts,
         )
-        self.blocks = nn.Sequential(
-            *[SelfAttention(
+        # self.blocks = nn.Sequential(
+        #     *[SelfAttention(
+        #         hidden_dim=hidden_dim, 
+        #         num_heads=num_heads,
+        #         mlp_ratio=4,
+        #         dropout_prob=dropout_prob,
+        #         num_experts=num_experts,
+        #     )
+        #     for _ in range(num_layers)]
+        # )
+        self.blocks = nn.ModuleList(
+            [SelfAttention(
                 hidden_dim=hidden_dim, 
                 num_heads=num_heads,
                 mlp_ratio=4,
                 dropout_prob=dropout_prob,
+                num_experts=num_experts,
             )
             for _ in range(num_layers)]
         )
@@ -350,6 +400,7 @@ class TabPerceiverMultiTask(nn.Module):
             num_heads=num_heads,
             mlp_ratio=4,
             dropout_prob=dropout_prob,
+            num_experts=num_experts,
         )
         
         self.projections = nn.ModuleList([
@@ -391,16 +442,21 @@ class TabPerceiverMultiTask(nn.Module):
         return num_features_list
 
     def forward(self, tf, task_idx):
+        expert_idx = task_idx if self.is_moe else None
+
         batch_size = len(tf)
         x, _ = self.tensor_frame_encoders[task_idx](tf)
         x = x + self.pos_embeddings[task_idx]
 
         latents = self.latents.repeat(batch_size, 1, 1)
-        x = self.encoder(latents, x)
-        x = self.blocks(x)
+        x = self.encoder(latents, x, expert_idx)
+
+        for block in self.blocks:
+            x = block(x, expert_idx)
+        # x = self.blocks(x, expert_idx)
 
         queries = self.queries[task_idx].repeat(batch_size, 1, 1)
-        x = self.decoder(queries, x).reshape(batch_size, -1)
+        x = self.decoder(queries, x, expert_idx).reshape(batch_size, -1)
         x = self.projections[task_idx](x)
         return x
 
