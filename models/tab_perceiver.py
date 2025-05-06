@@ -140,7 +140,7 @@ class SelfAttention(nn.Module):
         self.norm2 = nn.LayerNorm(hidden_dim)
 
         if num_experts is not None:
-            self.moe = nn.MoudleList([
+            self.moe = nn.ModuleList([
                 MLP(hidden_dim, moe_ratio, dropout_prob)
                 for _ in range(num_experts)
             ])
@@ -187,7 +187,7 @@ class CrossAttention(nn.Module):
         self.mlp_norm = nn.LayerNorm(hidden_dim)
 
         if num_experts is not None:
-            self.moe = nn.MoudleList([
+            self.moe = nn.ModuleList([
                 MLP(hidden_dim, moe_ratio, dropout_prob)
                 for _ in range(num_experts)
             ])
@@ -335,15 +335,17 @@ class TabPerceiverMultiTask(nn.Module):
         num_layers: int,
         num_latents: int,
         hidden_dim: int,
+        mlp_ratio: float,
         dropout_prob: float,
         col_stats: list,
         col_names_dicts: list,
+        moe_ratio: float = None,
         is_moe: bool = False,
     ):
         super(TabPerceiverMultiTask, self).__init__()
         self.num_tasks = len(col_stats)
         self.is_moe = is_moe
-        num_experts = num_tasks if is_moe else None
+        num_experts = self.num_tasks if is_moe else None
         num_features_list = self.calculate_num_features(col_names_dicts)
         
         self.tensor_frame_encoders = nn.ModuleList([
@@ -371,9 +373,10 @@ class TabPerceiverMultiTask(nn.Module):
         self.encoder = CrossAttention(
             hidden_dim=hidden_dim, 
             num_heads=num_heads, 
-            mlp_ratio=4,
+            mlp_ratio=mlp_ratio,
             dropout_prob=dropout_prob,
             num_experts=num_experts,
+            moe_ratio=moe_ratio,
         )
         # self.blocks = nn.Sequential(
         #     *[SelfAttention(
@@ -389,18 +392,20 @@ class TabPerceiverMultiTask(nn.Module):
             [SelfAttention(
                 hidden_dim=hidden_dim, 
                 num_heads=num_heads,
-                mlp_ratio=4,
+                mlp_ratio=mlp_ratio,
                 dropout_prob=dropout_prob,
                 num_experts=num_experts,
+            moe_ratio=moe_ratio,
             )
             for _ in range(num_layers)]
         )
         self.decoder = CrossAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            mlp_ratio=4,
+            mlp_ratio=mlp_ratio,
             dropout_prob=dropout_prob,
             num_experts=num_experts,
+            moe_ratio=moe_ratio,
         )
         
         self.projections = nn.ModuleList([
