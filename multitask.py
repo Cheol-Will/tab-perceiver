@@ -6,101 +6,180 @@ import torch
 from torch.nn import Module
 from torch.optim.lr_scheduler import ExponentialLR
 from torchmetrics import Metric
-from tqdm import tqdm
+
 from torch_frame.typing import TaskType
 from torch_frame.data import DataLoader
 from models import TabPerceiverMultiTask
-from utils import create_multitask_setup, init_best_metric
+from utils import create_multitask_setup, init_best_metrics
 from loaders import build_datasets, build_dataloaders
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def shuffle_task_index(dataloaders):
+def setup_environment(seed: int):
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+
+def shuffle_task_indices(loaders: list[DataLoader]) -> list[int]:
     task_order = []
-    for task_idx, dataloader in enumerate(dataloaders):
-        task_order += [task_idx] * len(dataloader)
+    for idx, loader in enumerate(loaders):
+        task_order.extend([idx] * len(loader))
     random.shuffle(task_order)
     return task_order
 
-def train(
+
+def train_epoch(
     model: Module,
-    loaders,
+    loaders: list[DataLoader],
     optimizer: torch.optim.Optimizer,
-    loss_fun: Module,
-    epoch: int,
-    task_type,
-    task_idx_list
+    loss_fn: Module,
+    task_type: TaskType,
+    task_idx_list: list[int]
 ) -> float:
     model.train()
-    loss_accum = total_count = 0
+    iters = [iter(loader) for loader in loaders]
+    total_loss = 0.0
+    total_samples = 0
 
-    loaders = [iter(loader) for loader in loaders]
-
-    for task_idx in tqdm(task_idx_list, desc=f'Epoch: {epoch}'):
-        tf = next(loaders[task_idx])    
-        tf = tf.to(device)
+    for task_idx in task_idx_list:
+        tf = next(iters[task_idx]).to(device)
         y = tf.y
-        pred = model(tf, task_idx)
-        if pred.size(1) == 1:
-            pred = pred.view(-1, )
+        preds = model(tf, task_idx)
+
+        if preds.size(1) == 1:
+            preds = preds.view(-1)
         if task_type == TaskType.BINARY_CLASSIFICATION:
-            y = y.to(torch.float)
-        loss = loss_fun(pred, y)
+            y = y.float()
+
+        loss = loss_fn(preds, y)
         optimizer.zero_grad()
         loss.backward()
-        loss_accum += float(loss) * len(tf.y)
-        total_count += len(tf.y)
         optimizer.step()
-    return loss_accum / total_count       
 
-def test(
+        total_loss += loss.item() * y.size(0)
+        total_samples += y.size(0)
+
+    return total_loss / total_samples
+
+
+def evaluate_task(
     model: Module,
     loader: DataLoader,
     metric_computer: Metric,
-    task_type,
-    task_idx,
+    task_type: TaskType,
+    task_idx: int
 ) -> float:
     model.eval()
     metric_computer.reset()
+
     with torch.no_grad():
         for tf in loader:
             tf = tf.to(device)
-            pred = model(tf, task_idx)
+            preds = model(tf, task_idx)
+
             if task_type == TaskType.MULTICLASS_CLASSIFICATION:
-                pred = pred.argmax(dim=-1)
-            elif task_type == TaskType.REGRESSION:
-                pred = pred.view(-1, )
-            metric_computer.update(pred, tf.y)
+                preds = preds.argmax(dim=-1)
+            elif task_type == TaskType.REGRESSION and preds.ndim > 1:
+                preds = preds.view(-1)
+
+            metric_computer.update(preds, tf.y)
+
     return metric_computer.compute().item()
 
-def finetune_and_eval(
+
+def train_and_evaluate(
+    args,
     model: Module,
-    train_loaders,
-    test_loaders,
-    optimizer,
-    lr_scheduler,
-    loss_fun,
-    finetune_epoch,
+    train_loaders: list[DataLoader],
+    valid_loaders: list[DataLoader],
+    test_loaders: list[DataLoader],
+    optimizer: torch.optim.Optimizer,
+    scheduler: ExponentialLR,
+    loss_fn: Module,
     metric_computer: Metric,
-    task_type,
-    task_idx,
+    task_type: TaskType,
+    higher_is_better: bool
+) -> tuple[list[float], list[float]]:
+    num_tasks = len(train_loaders)
+    best_val_metrics, best_test_metrics = init_best_metrics(higher_is_better, num_tasks)
+
+    for epoch in range(args.epochs):
+        task_idx_list = shuffle_task_indices(train_loaders)
+        train_loss = train_epoch(model, train_loaders, optimizer, loss_fn, task_type, task_idx_list)
+        scheduler.step()
+        print(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}")
+
+        for task_idx in range(num_tasks):
+            val_metric = evaluate_task(model, valid_loaders[task_idx], metric_computer, task_type, task_idx)
+            improved = (val_metric > best_val_metrics[task_idx]) if higher_is_better else (val_metric < best_val_metrics[task_idx])
+
+            if improved:
+                best_val_metrics[task_idx] = val_metric
+                best_test_metrics[task_idx] = evaluate_task(model, test_loaders[task_idx], metric_computer, task_type, task_idx)
+            # print(f"Epoch {epoch+1}/{args.epochs} [Task {task_idx}] - Best test metric: {best_test_metrics[task_idx]:.6f}")
+
+    return best_val_metrics, best_test_metrics
+
+
+def finetune_and_evaluate(
+    args,
+    model: Module,
+    train_loaders: list[DataLoader],
+    valid_loader: DataLoader,
+    test_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scheduler: ExponentialLR,
+    loss_fn: Module,
+    metric_computer: Metric,
+    task_type: TaskType,
+    task_idx: int,
+    init_val: float,
+    init_test: float,
+    higher_is_better: bool
 ) -> float:
+    best_val_metric, best_test_metric = init_val, init_test
 
-    # create task_idx_list for one task
-    finetune_task_idx_list = [task_idx] * len(train_loaders[task_idx])
+    for epoch in range(args.finetune_epochs):
+        finetune_indices = [task_idx] * len(train_loaders[task_idx])
+        train_loss = train_epoch(model, train_loaders, optimizer, loss_fn, task_type, finetune_indices)
+        scheduler.step()
 
-    # train on finetune epoch
-    for epoch in range(finetune_epoch):
-        train_loss = train(model, train_loaders, optimizer, loss_fun, epoch, task_type, finetune_task_idx_list)
-        lr_scheduler.step()
-        print(f"Train Loss: {train_loss:.7f}")
+        val_metric = evaluate_task(model, valid_loader, metric_computer, task_type, task_idx)
+        improved = (val_metric > best_val_metric) if higher_is_better else (val_metric < best_val_metric)
 
-    test_metric = test(model, test_loaders[task_idx], metric_computer, task_type, task_idx)
-    return test_metric
+        if improved:
+            best_val_metric = val_metric
+            best_test_metric = evaluate_task(model, test_loader, metric_computer, task_type, task_idx)
+
+    return best_test_metric
+
+
+def save_results(
+    args,
+    model_config: dict,
+    best_test_metrics: list[float],
+    best_finetune_test_metrics: list[float]
+):
+    for idx, finetune_test_metric in enumerate(best_finetune_test_metrics):
+        path = os.path.join("output", args.task_type, args.scale, str(idx), f"{args.exp_name}.pt")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({
+            'args': vars(args),
+            'model_config': model_config,
+            'best_test_before_finetune': best_test_metrics[idx],
+            'best_test_metric': finetune_test_metric
+        }, path)
+        print(f"Saved results to {path}")
+
 
 def main(args):
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
+    setup_environment(args.seed)
+
+    datasets = build_datasets(task_type=args.task_type, dataset_scale=args.scale)
+    train_loaders, valid_loaders, test_loaders, meta = build_dataloaders(datasets)
+    num_classes, loss_fn, metric_computer, higher_is_better, task_type = create_multitask_setup(datasets)
+    metric_computer.to(device)
+
     model_config = {
         "num_heads": 4,
         "num_layers": 6,
@@ -110,84 +189,55 @@ def main(args):
         "dropout_prob": 0,
     }
 
-    datasets = build_datasets(task_type=args.task_type, dataset_scale=args.scale)
-    num_tasks = len(datasets)
-    train_loaders, valid_loaders, test_loaders, meta_data = build_dataloaders(datasets)
-    num_classes, loss_fun, metric_computer, higher_is_better, task_type = create_multitask_setup(datasets)
-    metric_computer.to(device)
-
     model = TabPerceiverMultiTask(
         **model_config,
-        **meta_data,
+        **meta,
         num_classes=num_classes,
     ).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    lr_scheduler = ExponentialLR(optimizer, gamma=0.95)
+    scheduler = ExponentialLR(optimizer, gamma=0.95)
 
-    for epoch in range(args.epochs):        
-        task_idx_list = shuffle_task_index(train_loaders) # sample task_idx list
-        train_loss = train(model, train_loaders, optimizer, loss_fun, epoch, task_type, task_idx_list)
-        lr_scheduler.step()
-        print(f"Train Loss: {train_loss:.7f}")
+    best_val_metrics, best_test_metrics = train_and_evaluate(
+        args, model, train_loaders, valid_loaders, test_loaders,
+        optimizer, scheduler, loss_fn, metric_computer, task_type, higher_is_better
+    )
 
-    # Save weight and result before fintune
     checkpoint = {
-        "args": args.__dict__,
-        "model_config": model_config,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": lr_scheduler.state_dict(),
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict()
     }
 
-    # test on every task
-    for task_idx in range(num_tasks):
-        # load state_dict to finetune the same weight on each task
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        lr_scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        
-        # test on a single task without finetune
-        test_metric = test(model, test_loaders[task_idx], metric_computer, task_type, task_idx)
+    best_finetune_test_metrics = []
+    for idx in range(len(train_loaders)):
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
 
-        # test on a single task with finetune
-        finetune_test_metric = finetune_and_eval(
-            model,
-            train_loaders,
-            test_loaders,
-            optimizer,
-            lr_scheduler,
-            loss_fun,
-            args.finetune_epochs,
-            metric_computer,
-            task_type,
-            task_idx
+        finetune_test_metric = finetune_and_evaluate(
+            args, model, train_loaders,
+            valid_loaders[idx], test_loaders[idx],
+            optimizer, scheduler, loss_fn,
+            metric_computer, task_type,
+            idx, best_val_metrics[idx], best_test_metrics[idx], higher_is_better
         )
-        print(f"[Task {task_idx}]")
-        print(f"Test metric (before finetune): {test_metric:.6f}")
-        print(f"Test metric (after finetune):  {finetune_test_metric:.6f}")
-        
-        result_dict = {
-            'args': args.__dict__,
-            'model_config': model_config,
-            'best_test_metric_before_finetune': test_metric,
-            "best_test_metric": finetune_test_metric
-        }
+        best_finetune_test_metrics.append(finetune_test_metric)
+        print(f"[Task {idx}] Best test metric (before finetune): {best_test_metrics[idx]:.6f}, Best test metric (after finetune):  {finetune_test_metric:.6f}")
 
-        # save each result in output/task_type/scale/data_index/model_type
-        path = f"output/{args.task_type}/{args.scale}/{task_idx}/{args.exp_name}.pt"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(result_dict, path)
-        print(f"Result is saved into {path}")
+    save_results(args, model_config, best_test_metrics, best_finetune_test_metrics)
+
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--task_type', type=str, choices=['binary_classification', 'multiclass_classification', 'regression'],
+    parser = argparse.ArgumentParser(description="Multitask training and fine-tuning script")
+    parser.add_argument('--task_type', type=str,
+                        choices=['binary_classification', 'multiclass_classification', 'regression'],
                         default='binary_classification')
-    parser.add_argument('--scale', type=str, choices=['small', 'medium', 'large'],
-                        default='small')
+    parser.add_argument('--scale', type=str, choices=['small', 'medium', 'large'], default='small')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--finetune_epochs', type=int, default=5)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--exp_name', type=str, default='TabPerceiverMultiTask')
+    parser.add_argument('--exp_name', type=str, default='TabPerceiverMultiTask_')
     args = parser.parse_args()
+    
     main(args)
