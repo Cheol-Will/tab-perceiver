@@ -75,13 +75,15 @@ def test(
 
 def main(args):
     torch.manual_seed(args.seed)
-    result_list = []
     model_config = {
-        "num_heads": 8,
-        "num_layers": 8,
+        "num_heads": 4,
+        "num_layers": 6,
         "num_latents": 16,
         "hidden_dim": 64,
-        "dropout_prob": 0.2,
+        "mlp_ratio": 2,
+        "moe_ratio": 0.25,
+        "dropout_prob": 0,
+        "is_moe": True,
     }
 
     datasets = build_datasets(task_type=args.task_type, dataset_scale=args.scale)
@@ -105,18 +107,20 @@ def main(args):
         print(f"Train Loss: {train_loss:.7f}")
 
     # test on every task
-    result_list = [] 
     for task_idx in range(num_tasks):
         test_metric = test(model, test_loaders[task_idx], metric_computer, task_type, task_idx)
-        result_list.append({
-            f"{args.task_type}_{args.scale}_{task_idx}": {
-                "best_test_metric": test_metric
-            }
-        })                
+        print(f"[Task {task_idx}]")
+        print(f"Test metric: {test_metric:.6f}")
+        result_dict = {
+            'args': args.__dict__,
+            'model_config': model_config,
+            "best_test_metric": test_metric
+        }
+        path = f"output/{args.task_type}/{args.scale}/{task_idx}/{args.exp_name}.pt"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(result_dict, path)
+        print(f"Result is saved into {path}")
 
-    os.makedirs(os.path.dirname(args.result_path), exist_ok=True)
-    torch.save(result_list, args.result_path)
-    print(f"Result_list is saved into {args.result_path}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -126,6 +130,6 @@ if __name__ == '__main__':
                         default='small')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--result_path', type=str, default='')
+    parser.add_argument('--exp_name', type=str, default='TabPerceiverMultiTaskMOE')
     args = parser.parse_args()
     main(args)
