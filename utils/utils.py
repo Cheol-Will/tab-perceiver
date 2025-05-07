@@ -55,3 +55,14 @@ def init_best_metric(higher_is_better):
         best_test_metric = math.inf
 
     return best_val_metric, best_test_metric
+
+def init_best_metrics(higher_is_better, num_tasks):
+    if higher_is_better:
+        best_val_metric = 0
+        best_test_metric = 0
+    else:
+        best_val_metric = math.inf
+        best_test_metric = math.inf
+    best_val_metrics = [best_val_metric] * num_tasks
+    best_test_metrics = [best_test_metric] * num_tasks
+    return best_val_metrics, best_test_metrics
